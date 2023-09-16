@@ -294,6 +294,7 @@ class Det3DDataset(BaseDataset):
                         sweep['lidar_points']['lidar_path'] = osp.join(
                             self.data_prefix['sweeps'], file_suffix)
 
+        # Modifed by Yuxi Qian, handle the mutli-camera key case for visualization_hook
         if self.modality['use_camera']:
             for cam_id, img_info in info['images'].items():
                 if 'img_path' in img_info:
@@ -301,22 +302,50 @@ class Det3DDataset(BaseDataset):
                         cam_prefix = self.data_prefix[cam_id]
                     else:
                         cam_prefix = self.data_prefix.get('img', '')
-                    img_info['img_path'] = osp.join(cam_prefix,
-                                                    img_info['img_path'])
+                    img_info['img_path'] = osp.join(cam_prefix, img_info['img_path'])
+
+            def extract_info_for_cam_key(cam_key):
+                result = {}
+                if cam_key in info['images']:
+                    result['img_path'] = info['images'][cam_key]['img_path']
+                    if 'lidar2cam' in info['images'][cam_key]:
+                        result['lidar2cam'] = np.array(info['images'][cam_key]['lidar2cam'])
+                    if 'cam2img' in info['images'][cam_key]:
+                        result['cam2img'] = np.array(info['images'][cam_key]['cam2img'])
+                    if 'lidar2img' in info['images'][cam_key]:
+                        result['lidar2img'] = np.array(info['images'][cam_key]['lidar2img'])
+                    else:
+                        # Add by Yuxi Qian, tackle the info['cam2img'] @ info['lidar2cam'] dim error
+                        if result.get('cam2img', None) is not None and result['cam2img'].shape == (3, 3):
+                            extended_cam2img = np.eye(4)
+                            extended_cam2img[:3, :3] = result['cam2img']
+                            result['lidar2img'] = extended_cam2img @ result.get('lidar2cam', np.eye(4))
+                        elif result.get('cam2img', None) is not None and result['cam2img'].shape == (4, 4):
+                            result['lidar2img'] = result['cam2img'] @ result.get('lidar2cam', np.eye(4))
+                return result
+
             if self.default_cam_key is not None:
-                info['img_path'] = info['images'][
-                    self.default_cam_key]['img_path']
-                if 'lidar2cam' in info['images'][self.default_cam_key]:
-                    info['lidar2cam'] = np.array(
-                        info['images'][self.default_cam_key]['lidar2cam'])
-                if 'cam2img' in info['images'][self.default_cam_key]:
-                    info['cam2img'] = np.array(
-                        info['images'][self.default_cam_key]['cam2img'])
-                if 'lidar2img' in info['images'][self.default_cam_key]:
-                    info['lidar2img'] = np.array(
-                        info['images'][self.default_cam_key]['lidar2img'])
+                if isinstance(self.default_cam_key, list):
+                    info['img_path'] = []
+                    info['lidar2cam'] = []
+                    info['cam2img'] = []
+                    info['lidar2img'] = []
+                    for cam_key in self.default_cam_key:
+                        cam_info = extract_info_for_cam_key(cam_key)
+                        info['img_path'].append(cam_info.get('img_path'))
+                        info['lidar2cam'].append(cam_info.get('lidar2cam'))
+                        info['cam2img'].append(cam_info.get('cam2img'))
+                        info['lidar2img'].append(cam_info.get('lidar2img'))
+
+                elif isinstance(self.default_cam_key, str):
+                    cam_info = extract_info_for_cam_key(self.default_cam_key)
+                    info['img_path'] = cam_info.get('img_path')
+                    info['lidar2cam'] = cam_info.get('lidar2cam')
+                    info['cam2img'] = cam_info.get('cam2img')
+                    info['lidar2img'] = cam_info.get('lidar2img')
                 else:
-                    info['lidar2img'] = info['cam2img'] @ info['lidar2cam']
+                    raise TypeError("default_cam_key should be either a string or a list of strings.")
+            #End of modification
 
         if not self.test_mode:
             # used in training

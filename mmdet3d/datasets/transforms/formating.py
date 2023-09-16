@@ -220,7 +220,12 @@ class Pack3DDetInputs(BaseTransform):
                                               f'`Pack3DDetInputs` '
                                               f'to put {key} to '
                                               f'corresponding field')
-
+                    
+        #Add by Yuxi Qian, pass the bbox_3d for local_visualizer
+        if 'eval_ann_info' in results and 'gt_bboxes_3d' in results['eval_ann_info']:
+            gt_instances_3d['bboxes_3d'] = results['eval_ann_info']['gt_bboxes_3d']
+        #End of modification
+        
         data_sample.gt_instances_3d = gt_instances_3d
         data_sample.gt_instances = gt_instances
         data_sample.gt_pts_seg = gt_pts_seg

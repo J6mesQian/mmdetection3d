@@ -735,9 +735,18 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
 
         if draw_gt and data_sample is not None:
             if 'gt_instances_3d' in data_sample:
-                gt_data_3d = self._draw_instances_3d(
-                    data_input, data_sample.gt_instances_3d,
-                    data_sample.metainfo, vis_task, palette)
+                
+                # Modify by Yuxi Qian, pass metainfo dict with lidar2img
+                if 'lidar2img' in data_input:
+                    gt_data_3d = self._draw_instances_3d(
+                        data_input, data_sample.gt_instances_3d,
+                        data_input, vis_task, palette)
+                else:
+                    gt_data_3d = self._draw_instances_3d(
+                        data_input, data_sample.gt_instances_3d,
+                        data_sample.metainfo, vis_task, palette)
+                # End of modification
+            
             if 'gt_instances' in data_sample:
                 if len(data_sample.gt_instances) > 0:
                     assert 'img' in data_input
@@ -764,10 +773,20 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                 # so we need to use .to('cpu')
                 pred_instances_3d = pred_instances_3d[
                     pred_instances_3d.scores_3d > pred_score_thr].to('cpu')
-                pred_data_3d = self._draw_instances_3d(data_input,
-                                                       pred_instances_3d,
-                                                       data_sample.metainfo,
-                                                       vis_task, palette)
+                
+                # Modify by Yuxi Qian, pass metainfo dict with lidar2img
+                if 'lidar2img' in data_input:
+                    pred_data_3d = self._draw_instances_3d(data_input,
+                                                        pred_instances_3d,
+                                                        data_input,
+                                                        vis_task, palette)                
+                else:
+                    pred_data_3d = self._draw_instances_3d(data_input,
+                                                        pred_instances_3d,
+                                                        data_sample.metainfo,
+                                                        vis_task, palette)
+                # End of modification
+                
             if 'pred_instances' in data_sample:
                 if 'img' in data_input and len(data_sample.pred_instances) > 0:
                     pred_instances = data_sample.pred_instances
@@ -790,7 +809,8 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                                        ignore_index)
 
         # monocular 3d object detection image
-        if vis_task in ['mono_det', 'multi-modality_det']:
+        # Modify by Yuxi Qian, return the gt_img and pred_img seperately when is the multi-camera case
+        if vis_task in ['mono_det', 'multi-modality_det'] and not "CAM" in name:
             if gt_data_3d is not None and pred_data_3d is not None:
                 drawn_img_3d = np.concatenate(
                     (gt_data_3d['img'], pred_data_3d['img']), axis=1)
@@ -802,7 +822,8 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                 drawn_img_3d = None
         else:
             drawn_img_3d = None
-
+        # End of modification
+        
         # 2d object detection image
         if gt_img_data is not None and pred_img_data is not None:
             drawn_img = np.concatenate((gt_img_data, pred_img_data), axis=1)
@@ -821,13 +842,18 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                 win_name=name,
                 wait_time=wait_time)
 
+        # Modify by Yuxi Qian, add detail generated file name return gt and pred if is multi-camera case
         if out_file is not None:
             # check the suffix of the name of image file
             if not (out_file.endswith('.png') or out_file.endswith('.jpg')):
                 out_file = f'{out_file}.png'
-            if drawn_img_3d is not None:
-                mmcv.imwrite(drawn_img_3d[..., ::-1], out_file)
-            if drawn_img is not None:
-                mmcv.imwrite(drawn_img[..., ::-1], out_file)
-        else:
+            if gt_data_3d is not None:
+                mmcv.imwrite(gt_data_3d[..., ::-1], name + '_gt_' + out_file)
+            if pred_data_3d is not None:
+                mmcv.imwrite(pred_data_3d[..., ::-1], name + '_pred_' + out_file)
+
+        if not "CAM" in name:
             self.add_image(name, drawn_img_3d, step)
+        else:
+            return gt_data_3d, pred_data_3d
+        # End of modification

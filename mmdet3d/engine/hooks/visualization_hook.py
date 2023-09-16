@@ -56,7 +56,11 @@ class Det3DVisualizationHook(Hook):
                  vis_task: str = 'mono_det',
                  wait_time: float = 0.,
                  test_out_dir: Optional[str] = None,
-                 backend_args: Optional[dict] = None):
+                 backend_args: Optional[dict] = None,
+                 draw_interval: Optional[int] = 200,
+                 draw_stop_idx: Optional[int] = 6000,
+                 log_table : Optional[bool] = False
+                 ):
         self._visualizer: Visualizer = Visualizer.get_current_instance()
         self.interval = interval
         self.score_thr = score_thr
@@ -75,6 +79,9 @@ class Det3DVisualizationHook(Hook):
         self.draw = draw
         self.test_out_dir = test_out_dir
         self._test_index = 0
+        self.draw_interval = draw_interval
+        self.draw_stop_idx = draw_stop_idx
+        self.log_table = log_table
 
     def after_val_iter(self, runner: Runner, batch_idx: int, data_batch: dict,
                        outputs: Sequence[Det3DDataSample]) -> None:
@@ -113,7 +120,7 @@ class Det3DVisualizationHook(Hook):
 
         if total_curr_iter % self.interval == 0:
             self._visualizer.add_datasample(
-                'val sample',
+                f'vis_bbox_3d_idx={outputs[0].sample_idx}',
                 data_input,
                 data_sample=outputs[0],
                 show=self.show,
@@ -144,33 +151,143 @@ class Det3DVisualizationHook(Hook):
         for data_sample in outputs:
             self._test_index += 1
 
-            data_input = dict()
-            if 'img_path' in data_sample:
-                img_path = data_sample.img_path
-                img_bytes = get(img_path, backend_args=self.backend_args)
-                img = mmcv.imfrombytes(img_bytes, channel_order='rgb')
-                data_input['img'] = img
+        # Modify by Yuxi Qian, add mutli-camera visualization and log into wandb self.table
+        import wandb
 
-            if 'lidar_path' in data_sample:
-                lidar_path = data_sample.lidar_path
-                num_pts_feats = data_sample.num_pts_feats
-                pts_bytes = get(lidar_path, backend_args=self.backend_args)
-                points = np.frombuffer(pts_bytes, dtype=np.float32)
-                points = points.reshape(-1, num_pts_feats)
-                data_input['points'] = points
+        self.table = None
+        
+        if all(data_sample.sample_idx % self.draw_interval != 0 for data_sample in outputs) and self.log_table:
+            return
 
-            out_file = None
-            if self.test_out_dir is not None:
-                out_file = osp.basename(img_path)
-                out_file = osp.join(self.test_out_dir, out_file)
+        out_file = None
+        if self.test_out_dir is not None:
+            out_file = osp.basename(img_path)
+            out_file = osp.join(self.test_out_dir, out_file)
+        
+        for data_sample in outputs:
+            self._test_index += 1
+            if data_sample.sample_idx % self.draw_interval != 0:
+                continue
+            # Dictionary to store wandb image lists with camera_key as keys
+            camera_key_vis_images_dict = {}
+            idxs = ''
+            # Multi-camera scenario
+            
+            if ('img_path' in data_sample and isinstance(data_sample.img_path, list)) or ('lidar_path' in data_sample and isinstance(data_sample.lidar_path, list)):  
+                if not ('img_path' in data_sample):
+                    assert False
+                for i, single_img_path in enumerate(data_sample.img_path):
+                    data_input = dict()
 
-            self._visualizer.add_datasample(
-                'test sample',
-                data_input,
-                data_sample=data_sample,
-                show=self.show,
-                vis_task=self.vis_task,
-                wait_time=self.wait_time,
-                pred_score_thr=self.score_thr,
-                out_file=out_file,
-                step=self._test_index)
+                    img_bytes = get(single_img_path, backend_args=self.backend_args)
+                    img = mmcv.imfrombytes(img_bytes, channel_order='rgb')
+                    data_input['img'] = img
+
+                    # Handling lidar_path for both list and single scenario
+                    if 'lidar_path' in data_sample:
+                        if isinstance(data_sample.lidar_path, list):
+                            lidar_path = data_sample.lidar_path[i]
+                        else:
+                            lidar_path = data_sample.lidar_path
+
+                        num_pts_feats = data_sample.num_pts_feats
+                        pts_bytes = get(lidar_path, backend_args=self.backend_args)
+                        points = np.frombuffer(pts_bytes, dtype=np.float32)
+                        points = points.reshape(-1, num_pts_feats)
+                        data_input['points'] = points
+
+                    camera_key = [part for part in single_img_path.split('/') if "CAM" in part][0]
+
+                    # Check for the camera fields
+                    for field in ['lidar2cam', 'cam2img', 'lidar2img']:
+                        if hasattr(data_sample, field):
+                            value = data_sample.get(field)
+                            if isinstance(value, list):
+                                data_input[field] = value[i]
+
+                            else:
+                                assert False
+                                data_input[field] = value
+                    gt, pred = self._visualizer.add_datasample(
+                        f'vis_bbox_3d_idx={data_sample.sample_idx}_{camera_key}',
+                        data_input,
+                        data_sample=data_sample,
+                        show=self.show,
+                        vis_task=self.vis_task,
+                        wait_time=self.wait_time,
+                        pred_score_thr=self.score_thr,
+                        out_file=out_file,
+                        step=self._test_index)
+                    # Get the camera key from the img_path
+
+                    # Convert np arrays to wandb images and add to the list
+                    camera_key_visualization_list = [
+                        wandb.Image(gt['img'], caption=f"{camera_key}_bbox_3d_gt"),
+                        wandb.Image(pred['img'], caption=f"{camera_key}_bbox_3d_pred")
+                    ]
+                    
+                    # Store the wandb images list in the dictionary
+                    camera_key_vis_images_dict[camera_key] = camera_key_visualization_list
+                    
+                # If camera_key_vis_images_dict isn't empty, proceed
+                if camera_key_vis_images_dict:
+                    # If self.table hasn't been created yet
+                    if not self.table:
+                        # Base columns for self.table
+                        columns = ["sample_idx"] + list(camera_key_vis_images_dict.keys()) + ["paths_to_images"]
+                        self.table = wandb.Table(columns=columns)
+
+                    # Create row data
+                    row_data = [data_sample.sample_idx]
+                    for key in self.table.columns:
+                        if key == "sample_idx":
+                            continue
+                        elif key == "paths_to_images":
+                            row_data.append([osp.basename(path) for path in data_sample.img_path])
+                        else:
+                            row_data.append(camera_key_vis_images_dict.get(key, None))
+
+                # Add the row data to the self.table
+                idxs += str(data_sample.sample_idx) + ','
+                
+                print(f'current_sample_idx={data_sample.sample_idx}')
+                if data_sample.sample_idx >= 6000:
+                    self.log_table = True
+                    
+                self.table.add_data(*row_data)
+                                  
+            # Single camera scenario
+            elif ('img_path' in data_sample and isinstance(data_sample.img_path, str)) or ('lidar_path' in data_sample and isinstance(data_sample.lidar_path, str)):
+                data_input = dict()
+                
+                if 'img_path' in data_sample:
+                    img_path = data_sample.img_path
+                    img_bytes = get(img_path, backend_args=self.backend_args)
+                    img = mmcv.imfrombytes(img_bytes, channel_order='rgb')
+                    data_input['img'] = img
+
+                if 'lidar_path' in data_sample:
+                    lidar_path = data_sample.lidar_path
+                    num_pts_feats = data_sample.num_pts_feats
+                    pts_bytes = get(lidar_path, backend_args=self.backend_args)
+                    points = np.frombuffer(pts_bytes, dtype=np.float32)
+                    points = points.reshape(-1, num_pts_feats)
+                    data_input['points'] = points
+
+
+                self._visualizer.add_datasample(
+                    f'test_vis_bbox_3d_idx={data_sample.sample_idx}',
+                    data_input,
+                    data_sample=data_sample,
+                    show=self.show,
+                    vis_task=self.vis_task,
+                    wait_time=self.wait_time,
+                    pred_score_thr=self.score_thr,
+                    out_file=out_file,
+                    step=self._test_index)
+        
+        if self.table and self.log_table:
+            name = 'test_visualization_batch' # _idx=' +  idxs.rstrip(',')
+            print('log wandb test visualization table')
+            wandb.log({name: self.table})
+            # End of modification
