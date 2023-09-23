@@ -3,6 +3,7 @@ import copy
 from typing import List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
+import re
 import mmcv
 import numpy as np
 from matplotlib.collections import PatchCollection
@@ -14,6 +15,8 @@ from mmengine.structures import InstanceData
 from mmengine.visualization import Visualizer as MMENGINE_Visualizer
 from mmengine.visualization.utils import check_type, tensor2ndarray
 from torch import Tensor
+from os import path as osp
+import wandb
 
 from mmdet3d.registry import VISUALIZERS
 from mmdet3d.structures import (BaseInstance3DBoxes, Box3DMode,
@@ -677,27 +680,27 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
     # respectively
     @master_only
     def add_datasample(self,
-                       name: str,
-                       data_input: dict,
-                       data_sample: Optional[Det3DDataSample] = None,
-                       draw_gt: bool = True,
-                       draw_pred: bool = True,
-                       show: bool = False,
-                       wait_time: float = 0,
-                       out_file: Optional[str] = None,
-                       o3d_save_path: Optional[str] = None,
-                       vis_task: str = 'mono_det',
-                       pred_score_thr: float = 0.3,
-                       step: int = 0) -> None:
+                        name: str,
+                        data_input: dict,
+                        data_sample: Optional[Det3DDataSample] = None,
+                        draw_gt: bool = True,
+                        draw_pred: bool = True,
+                        show: bool = False,
+                        wait_time: float = 0,
+                        out_file: Optional[str] = None,
+                        o3d_save_path: Optional[str] = None,
+                        vis_task: str = 'mono_det',
+                        pred_score_thr: float = 0.3,
+                        step: int = 0) -> None:
         """Draw datasample and save to all backends.
 
         - If GT and prediction are plotted at the same time, they are displayed
-          in a stitched image where the left image is the ground truth and the
-          right image is the prediction.
+            in a stitched image where the left image is the ground truth and the
+            right image is the prediction.
         - If ``show`` is True, all storage backends are ignored, and the images
-          will be displayed in a local window.
+            will be displayed in a local window.
         - If ``out_file`` is specified, the drawn image will be saved to
-          ``out_file``. It is usually used when the display is not available.
+            ``out_file``. It is usually used when the display is not available.
 
         Args:
             name (str): The image identifier.
@@ -763,8 +766,8 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                                             'segmentation results.'
                 assert 'points' in data_input
                 self._draw_pts_sem_seg(data_input['points'],
-                                       data_sample.gt_pts_seg, palette,
-                                       ignore_index)
+                                        data_sample.gt_pts_seg, palette,
+                                        ignore_index)
 
         if draw_pred and data_sample is not None:
             if 'pred_instances_3d' in data_sample:
@@ -805,8 +808,8 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
                                             'segmentation results.'
                 assert 'points' in data_input
                 self._draw_pts_sem_seg(data_input['points'],
-                                       data_sample.pred_pts_seg, palette,
-                                       ignore_index)
+                                        data_sample.pred_pts_seg, palette,
+                                        ignore_index)
 
         # monocular 3d object detection image
         # Modify by Yuxi Qian, return the gt_img and pred_img seperately when is the multi-camera case
@@ -848,9 +851,13 @@ class Det3DLocalVisualizer(DetLocalVisualizer):
             if not (out_file.endswith('.png') or out_file.endswith('.jpg')):
                 out_file = f'{out_file}.png'
             if gt_data_3d is not None:
-                mmcv.imwrite(gt_data_3d[..., ::-1], name + '_gt_' + out_file)
+                gt_path = osp.join(osp.dirname(out_file), f"{name}_gt_{osp.basename(out_file)}")
+                mmcv.imwrite(gt_data_3d['img'][..., ::-1],gt_path)
+                print(f'gt image saved to {gt_path}')
             if pred_data_3d is not None:
-                mmcv.imwrite(pred_data_3d[..., ::-1], name + '_pred_' + out_file)
+                pred_path = osp.join(osp.dirname(out_file), f"{name}_pred_{osp.basename(out_file)}")
+                mmcv.imwrite(pred_data_3d['img'][..., ::-1],pred_path)
+                print(f'pred image saved to {pred_path}')
 
         if not "CAM" in name:
             self.add_image(name, drawn_img_3d, step)

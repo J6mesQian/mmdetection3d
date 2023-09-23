@@ -2,6 +2,7 @@
 import os.path as osp
 import warnings
 from typing import Optional, Sequence
+import wandb
 
 import mmcv
 import numpy as np
@@ -50,7 +51,7 @@ class Det3DVisualizationHook(Hook):
 
     def __init__(self,
                  draw: bool = False,
-                 interval: int = 50,
+                 interval: int = 2,
                  score_thr: float = 0.3,
                  show: bool = False,
                  vis_task: str = 'mono_det',
@@ -59,7 +60,7 @@ class Det3DVisualizationHook(Hook):
                  backend_args: Optional[dict] = None,
                  draw_interval: Optional[int] = 200,
                  draw_stop_idx: Optional[int] = 6000,
-                 log_table : Optional[bool] = False
+                 log_table : Optional[bool] = True,
                  ):
         self._visualizer: Visualizer = Visualizer.get_current_instance()
         self.interval = interval
@@ -79,10 +80,28 @@ class Det3DVisualizationHook(Hook):
         self.draw = draw
         self.test_out_dir = test_out_dir
         self._test_index = 0
+        # Add by Yuxi Qian
         self.draw_interval = draw_interval
         self.draw_stop_idx = draw_stop_idx
         self.log_table = log_table
+        self.current_val_epoch = 0
+        self.current_val_iter = 0
+        if self.log_table:
+            self.table = None
+            self.dump_log_table = False
+            self.has_dump_log_table = False
+        # End of modification
+    
+    # Add by Yuxi Qian
+    def before_run(self, runner) -> None:
+        if self.test_out_dir is None:
+            self.test_out_dir = osp.join(runner.work_dir, runner.timestamp)
 
+    def after_val_epoch(self, runner, metrics = None) -> None:
+        self.current_val_iter = 0
+        self.current_val_epoch += 1
+    # End of modification
+    
     def after_val_iter(self, runner: Runner, batch_idx: int, data_batch: dict,
                        outputs: Sequence[Det3DDataSample]) -> None:
         """Run after every ``self.interval`` validation iterations.
@@ -102,10 +121,10 @@ class Det3DVisualizationHook(Hook):
         total_curr_iter = runner.iter + batch_idx
 
         data_input = dict()
-
+        
         # Visualize only the first data
         if 'img_path' in outputs[0]:
-            img_path = outputs[0].img_path
+            img_path = outputs[0].img_path[1]
             img_bytes = get(img_path, backend_args=self.backend_args)
             img = mmcv.imfrombytes(img_bytes, channel_order='rgb')
             data_input['img'] = img
@@ -118,16 +137,26 @@ class Det3DVisualizationHook(Hook):
             points = points.reshape(-1, num_pts_feats)
             data_input['points'] = points
 
-        if total_curr_iter % self.interval == 0:
+        data_input['lidar2img'] = outputs[0].lidar2img[1]
+        
+        out_file = None
+        if self.test_out_dir is not None:
+            out_file = osp.basename(img_path)
+            out_file = osp.join(self.test_out_dir, out_file)       
+        if batch_idx % self.interval == 0:
+
             self._visualizer.add_datasample(
-                f'vis_bbox_3d_idx={outputs[0].sample_idx}',
+                f'val/vis/sample_idx={outputs[0].sample_idx}',
                 data_input,
                 data_sample=outputs[0],
                 show=self.show,
+                out_file=out_file,
                 vis_task=self.vis_task,
                 wait_time=self.wait_time,
                 pred_score_thr=self.score_thr,
-                step=total_curr_iter)
+                step=self.current_val_iter)
+        
+        self.current_val_iter += 1
 
     def after_test_iter(self, runner: Runner, batch_idx: int, data_batch: dict,
                         outputs: Sequence[Det3DDataSample]) -> None:
@@ -145,24 +174,18 @@ class Det3DVisualizationHook(Hook):
 
         if self.test_out_dir is not None:
             self.test_out_dir = osp.join(runner.work_dir, runner.timestamp,
-                                         self.test_out_dir)
+)
             mkdir_or_exist(self.test_out_dir)
 
         for data_sample in outputs:
             self._test_index += 1
 
         # Modify by Yuxi Qian, add mutli-camera visualization and log into wandb self.table
-        import wandb
-
-        self.table = None
         
-        if all(data_sample.sample_idx % self.draw_interval != 0 for data_sample in outputs) and self.log_table:
+        if all(data_sample.sample_idx % self.draw_interval != 0 for data_sample in outputs) or self.has_dump_log_table:
             return
 
         out_file = None
-        if self.test_out_dir is not None:
-            out_file = osp.basename(img_path)
-            out_file = osp.join(self.test_out_dir, out_file)
         
         for data_sample in outputs:
             self._test_index += 1
@@ -208,8 +231,13 @@ class Det3DVisualizationHook(Hook):
                             else:
                                 assert False
                                 data_input[field] = value
+                    
+                    if self.test_out_dir is not None:
+                        out_file = osp.basename(single_img_path)
+                        out_file = osp.join(self.test_out_dir,'test_vis',out_file)
+                        
                     gt, pred = self._visualizer.add_datasample(
-                        f'vis_bbox_3d_idx={data_sample.sample_idx}_{camera_key}',
+                        f'test/vis/idx={data_sample.sample_idx}_{camera_key}',
                         data_input,
                         data_sample=data_sample,
                         show=self.show,
@@ -234,7 +262,7 @@ class Det3DVisualizationHook(Hook):
                     # If self.table hasn't been created yet
                     if not self.table:
                         # Base columns for self.table
-                        columns = ["sample_idx"] + list(camera_key_vis_images_dict.keys()) + ["paths_to_images"]
+                        columns = ["sample_idx"] + list(camera_key_vis_images_dict.keys())
                         self.table = wandb.Table(columns=columns)
 
                     # Create row data
@@ -242,19 +270,18 @@ class Det3DVisualizationHook(Hook):
                     for key in self.table.columns:
                         if key == "sample_idx":
                             continue
-                        elif key == "paths_to_images":
-                            row_data.append([osp.basename(path) for path in data_sample.img_path])
                         else:
                             row_data.append(camera_key_vis_images_dict.get(key, None))
+                    
+                    self.table.add_data(*row_data)
 
                 # Add the row data to the self.table
                 idxs += str(data_sample.sample_idx) + ','
                 
-                print(f'current_sample_idx={data_sample.sample_idx}')
-                if data_sample.sample_idx >= 6000:
-                    self.log_table = True
+                print(f'current_eval_sample_idx={data_sample.sample_idx}')
+                if data_sample.sample_idx >= self.draw_stop_idx:
+                    self.dump_log_table = True
                     
-                self.table.add_data(*row_data)
                                   
             # Single camera scenario
             elif ('img_path' in data_sample and isinstance(data_sample.img_path, str)) or ('lidar_path' in data_sample and isinstance(data_sample.lidar_path, str)):
@@ -274,9 +301,12 @@ class Det3DVisualizationHook(Hook):
                     points = points.reshape(-1, num_pts_feats)
                     data_input['points'] = points
 
-
+                if self.test_out_dir is not None:
+                    out_file = osp.basename(img_path)
+                    out_file = osp.join(self.test_out_dir, 'test_vis',out_file)
+                    
                 self._visualizer.add_datasample(
-                    f'test_vis_bbox_3d_idx={data_sample.sample_idx}',
+                    f'test/vis/idx={data_sample.sample_idx}',
                     data_input,
                     data_sample=data_sample,
                     show=self.show,
@@ -284,10 +314,11 @@ class Det3DVisualizationHook(Hook):
                     wait_time=self.wait_time,
                     pred_score_thr=self.score_thr,
                     out_file=out_file,
-                    step=self._test_index)
+                    step=data_sample.sample_idx)
         
-        if self.table and self.log_table:
-            name = 'test_visualization_batch' # _idx=' +  idxs.rstrip(',')
+        if self.table and self.dump_log_table and not self.has_dump_log_table:
+            name = 'test/vis/table' # _idx=' +  idxs.rstrip(',')
             print('log wandb test visualization table')
-            wandb.log({name: self.table})
+            wandb.log({name: self.table},commit = True)
+            self.has_dump_log_table = True
             # End of modification
